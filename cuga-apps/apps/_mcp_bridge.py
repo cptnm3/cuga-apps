@@ -173,6 +173,36 @@ def _unwrap_mcp_tool_result(raw):
     return parsed if parsed is not None else raw
 
 
+# JSON-Schema "type" → Python type, used by _FieldInfoShim.annotation so that
+# cuga's arg_warning code path (which calls jsonschema_type(f.annotation)) sees
+# the right Python type instead of crashing on a plain dict.
+_JSONSCHEMA_TYPE_TO_PY: dict = {
+    "string":  str,
+    "integer": int,
+    "number":  float,
+    "boolean": bool,
+    "array":   list,
+    "object":  dict,
+}
+
+
+class _FieldInfoShim:
+    """Minimal stand-in for a Pydantic FieldInfo that exposes `.annotation`.
+
+    cuga's arg_warning.py iterates `input_model.model_fields.items()` and
+    accesses `f.annotation` on each value. When args_schema is a JSON-Schema
+    dict the properties values are plain dicts ({"type": "string", ...}) which
+    have no such attribute — hence the AttributeError. This shim wraps one
+    property entry and maps its "type" field back to a Python type so
+    jsonschema_type(f.annotation) works correctly.
+    """
+    __slots__ = ("annotation",)
+
+    def __init__(self, prop: dict) -> None:
+        js_type = prop.get("type", "string") if isinstance(prop, dict) else "string"
+        self.annotation = _JSONSCHEMA_TYPE_TO_PY.get(js_type, str)
+
+
 class _ArgsSchemaShim(dict):
     """Make a JSON-Schema dict (what langchain-mcp-adapters now sets on
     StructuredTool.args_schema) quack like a Pydantic model class.
@@ -196,9 +226,12 @@ class _ArgsSchemaShim(dict):
         return dict(self)
 
     # Also expose model_fields for any code path that uses it for arg names.
+    # Returns _FieldInfoShim instances so cuga's arg_warning.py can access
+    # `.annotation` without AttributeError (plain dicts don't have it).
     @property
     def model_fields(self) -> dict:
-        return self.get("properties", {}) or {}
+        props = self.get("properties", {}) or {}
+        return {name: _FieldInfoShim(prop) for name, prop in props.items()}
 
 
 # Generic note appended to every MCP tool's description so cuga's code-
